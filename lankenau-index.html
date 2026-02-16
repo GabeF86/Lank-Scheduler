@@ -1,0 +1,1140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UAS — Lankenau Staffing Optimizer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>* { margin: 0; padding: 0; box-sizing: border-box; } body { background: #0B1426; font-family: 'DM Sans', -apple-system, sans-serif; }</style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+
+
+const C = {
+  bg: "#0B1426", card: "#111D33", accent: "#00D4AA", accentDim: "#00A88A",
+  accentGlow: "rgba(0,212,170,0.15)", md: "#4A90D9", mdLight: "#6BA8F0",
+  mdGlow: "rgba(74,144,217,0.25)", crna: "#E8873A", crnaLight: "#F0A060",
+  crnaGlow: "rgba(232,135,58,0.25)", text: "#E8ECF4", textDim: "#8899B0",
+  textMuted: "#5A6A80", border: "#1E2D45", borderLight: "#2A3D5A",
+  danger: "#E85454", warning: "#E8C854", success: "#4AE8A0",
+  solo: "#B06AE8", soloGlow: "rgba(176,106,232,0.25)",
+  trauma: "#FF5C5C", traumaGlow: "rgba(255,92,92,0.2)",
+  cardiac: "#E05599", cardiacGlow: "rgba(224,85,153,0.15)",
+  ep: "#29B6F6", epGlow: "rgba(41,182,246,0.15)",
+  endo: "#8BC34A", ob: "#E88AD0",
+  ir: "#FFAB40", irGlow: "rgba(255,171,64,0.15)",
+  c8101: "#FFD54F", c8101Glow: "rgba(255,213,79,0.15)",
+  floatCol: "#80CBC4", floatGlow: "rgba(128,203,196,0.15)",
+};
+
+// ─── Live Clock Hook ─────────────────────────────────────────────
+function useClock() {
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const days = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+  const months = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  return {
+    day: days[now.getDay()], month: months[now.getMonth()],
+    date: now.getDate(), year: now.getFullYear(),
+    time: `${now.getHours()%12||12}:${String(now.getMinutes()).padStart(2,"0")}:${String(now.getSeconds()).padStart(2,"0")} ${now.getHours()>=12?"PM":"AM"}`,
+  };
+}
+
+// ─── Algorithm ───────────────────────────────────────────────────
+function calcStaffing(cfg, avail = { mds: 99, crnas: 99 }) {
+  const asgn = [];
+  let mdt = 0, crt = 0;
+  const contingencies = [];
+  const push = o => { asgn.push(o); return o; };
+
+  // ── MD Budget — estimate total need and decide if we must conserve ──
+  const fixedMDs = 1 + 1 + cfg.cardiac; // 8101 + OB + cardiac solos
+  const totalORs_est = cfg.mainOR + cfg.addOnRooms;
+  const orSupvEst = totalORs_est > 0 ? Math.max(1, Math.ceil((totalORs_est - 2) / 3)) : 0; // 8101 takes 2
+  const endoMDEst = cfg.endo > 0 ? 1 : 0;
+  const epMDEst = cfg.ep > 0 ? 1 : 0;
+  const apcMDEst = cfg.apc >= 2 ? 2 : cfg.apc; // optimal: supv + solo
+  const totalMDEst = fixedMDs + endoMDEst + epMDEst + apcMDEst + orSupvEst;
+  const mdTight = totalMDEst >= avail.mds; // true = conserve MDs
+
+  // ── 8101 — Schedule Runner ──
+  const md8101 = push({ id:`md-${mdt++}`, type:"MD", role:"8101", site:"8101",
+    supervises:[], isSolo:true, is8101:true,
+    notes:"Runs schedule. Available for emergencies, traumas, epidurals. Avoids rooms if possible." });
+
+  // ── OB — always staffed ──
+  const obMD = push({ id:`md-${mdt++}`, type:"MD", role:"OB MD", site:"OB",
+    supervises:[], isSolo:true,
+    notes:"Covers L&D, epidurals, C-sections." });
+
+  // ── Cardiac — solo MDs only ──
+  const cardiacMDs = [];
+  for (let i = 0; i < cfg.cardiac; i++) {
+    cardiacMDs.push(push({ id:`md-${mdt++}`, type:"MD", role:`Cardiac ${i+1}`, site:"Cardiac",
+      supervises:[], isSolo:true, isCardiac:true,
+      notes:"Cardiac anesthesiologist. Solo coverage including TAVR." }));
+  }
+
+  // ── Endo — 1 MD supervising CRNAs ──
+  let endoMD = null;
+  const endoCRNAs = [];
+  if (cfg.endo > 0) {
+    endoMD = push({ id:`md-${mdt++}`, type:"MD", role:"Endo MD", site:"Endo",
+      supervises:[], isSolo: cfg.endo === 0,
+      notes:"Dedicated Endo MD supervising GI CRNAs." });
+    for (let i = 0; i < cfg.endo; i++) {
+      const c = push({ id:`crna-${crt++}`, type:"CRNA", role:`Endo ${i+1}`, site:"Endo",
+        supervisedBy: endoMD.id });
+      endoMD.supervises.push(c.id);
+      endoCRNAs.push(c);
+    }
+  }
+
+  // ── EP — MD supervising CRNAs, toggle for DCCV/TEE ──
+  let epMD = null;
+  const epCRNAs = [];
+  if (cfg.ep > 0) {
+    const procRooms = cfg.epTEE ? cfg.ep - 1 : cfg.ep;
+    epMD = push({ id:`md-${mdt++}`, type:"MD", role:"EP MD", site:"EP Lab",
+      supervises:[], isSolo: false,
+      notes:"EP Lab MD supervising procedure CRNAs." + (cfg.epTEE ? " DCCV/TEE room active." : "") });
+    for (let i = 0; i < procRooms; i++) {
+      const c = push({ id:`crna-${crt++}`, type:"CRNA", role:`EP ${i+1}`, site:"EP Lab",
+        supervisedBy: epMD.id });
+      epMD.supervises.push(c.id);
+      epCRNAs.push(c);
+    }
+    if (cfg.epTEE) {
+      const teeC = push({ id:`crna-${crt++}`, type:"CRNA", role:"DCCV/TEE", site:"EP Lab",
+        supervisedBy: epMD.id, isTEE: true,
+        notes:"Dedicated DCCV/TEE CRNA. Available for break relief between cases." });
+      epMD.supervises.push(teeC.id);
+      epCRNAs.push(teeC);
+    }
+    if (epMD.supervises.length === 0) { epMD.isSolo = true; }
+  }
+
+  // ── APC — staffing depends on MD budget ──
+  // Optimal (MDs plentiful): 1 supervising MD (1:3) + 1 solo MD = 2 MDs
+  // Conservative (MDs tight): 1 MD supervising all CRNAs (up to 1:4) = 1 MD
+  // CRNA shortage: all solo MDs
+  const apcMDs = [], apcCRNAs = [];
+  if (cfg.apc > 0) {
+    const crnasSoFar = asgn.filter(a => a.type === "CRNA").length;
+    const crnaForMainOR = cfg.mainOR + cfg.addOnRooms;
+    const crnaForFloats = 3;
+    const crnaEstNeeded = crnasSoFar + crnaForMainOR + crnaForFloats;
+    const crnaAvailForAPC = Math.max(0, avail.crnas - crnaEstNeeded);
+
+    if (crnaAvailForAPC >= cfg.apc && !mdTight) {
+      // Optimal: 1 supv + 1 solo (2 MDs), CRNAs under supv
+      const supMD = push({ id:`md-${mdt++}`, type:"MD", role:"APC Supv", site:"APC",
+        supervises:[], isSolo:false,
+        notes:"APC supervising MD. 1:3 optimal ratio." });
+      apcMDs.push(supMD);
+      const soloMD = push({ id:`md-${mdt++}`, type:"MD", role:"APC Solo", site:"APC",
+        supervises:[], isSolo:true,
+        notes:"APC solo MD. Covers 1 room independently." });
+      apcMDs.push(soloMD);
+      const crnaCount = Math.min(cfg.apc - 1, 3);
+      for (let i = 0; i < crnaCount; i++) {
+        const c = push({ id:`crna-${crt++}`, type:"CRNA", role:`APC ${i+1}`, site:"APC",
+          supervisedBy: supMD.id });
+        supMD.supervises.push(c.id);
+        apcCRNAs.push(c);
+      }
+    } else if (crnaAvailForAPC >= cfg.apc) {
+      // Conservative: 1 MD supervising all APC CRNAs (saves 1 MD)
+      const supMD = push({ id:`md-${mdt++}`, type:"MD", role:"APC Supv", site:"APC",
+        supervises:[], isSolo:false,
+        notes:`APC supervising MD. 1:${cfg.apc} ratio (MD conservation mode).` });
+      apcMDs.push(supMD);
+      for (let i = 0; i < cfg.apc; i++) {
+        const c = push({ id:`crna-${crt++}`, type:"CRNA", role:`APC ${i+1}`, site:"APC",
+          supervisedBy: supMD.id });
+        supMD.supervises.push(c.id);
+        apcCRNAs.push(c);
+      }
+    } else {
+      // Short on CRNAs: all solo MDs
+      for (let i = 0; i < cfg.apc; i++) {
+        apcMDs.push(push({ id:`md-${mdt++}`, type:"MD", role:`APC MD ${i+1}`, site:"APC",
+          supervises:[], isSolo:true,
+          notes:"APC solo MD (CRNAs unavailable)." }));
+      }
+    }
+  }
+
+  // ── Main OR — 1:3 optimal, 1:4 max ──
+  // Smart 8101 usage: if giving 8101 1-2 rooms reduces the number of dedicated
+  // OR supervising MDs needed, do it proactively (freeing an MD for other duties)
+  const totalORs = cfg.mainOR + cfg.addOnRooms;
+  const orMDs = [], orCRNAs = [];
+
+  if (totalORs > 0) {
+    const supMDsWithout8101 = Math.max(1, Math.ceil(totalORs / 3));
+
+    // Would giving 8101 up to 2 rooms save us an OR Supv MD?
+    let rooms8101 = 0;
+    const supMDsWith1 = Math.max(1, Math.ceil((totalORs - 1) / 3));
+    const supMDsWith2 = Math.max(1, Math.ceil((totalORs - 2) / 3));
+
+    if (totalORs >= 2 && supMDsWith2 < supMDsWithout8101) {
+      rooms8101 = 2; // 8101 takes 2, saves at least 1 dedicated OR MD
+    } else if (totalORs >= 1 && supMDsWith1 < supMDsWithout8101) {
+      rooms8101 = 1;
+    }
+
+    const actualSupMDs = rooms8101 > 0
+      ? Math.max(1, Math.ceil((totalORs - rooms8101) / 3))
+      : supMDsWithout8101;
+
+    for (let i = 0; i < actualSupMDs; i++) {
+      orMDs.push(push({ id:`md-${mdt++}`, type:"MD", role:`OR Supv ${i+1}`, site:"Main OR",
+        supervises:[], isSolo:false,
+        notes:"Main OR supervision. 1:3 target ratio." }));
+    }
+
+    // Create CRNAs for all ORs
+    for (let i = 0; i < totalORs; i++) {
+      const label = i < cfg.mainOR ? `OR ${i+1}` : `Add-On ${i - cfg.mainOR + 1}`;
+      const c = push({ id:`crna-${crt++}`, type:"CRNA", role:label, site:"Main OR",
+        supervisedBy:null, isAddOn: i >= cfg.mainOR });
+      orCRNAs.push(c);
+    }
+
+    // Assign 8101's rooms first
+    let ci = 0;
+    for (let i = 0; i < rooms8101 && ci < orCRNAs.length; i++) {
+      orCRNAs[ci].supervisedBy = md8101.id;
+      md8101.supervises.push(orCRNAs[ci].id);
+      md8101.isSolo = false;
+      ci++;
+    }
+    if (rooms8101 > 0) {
+      md8101.notes = `Carrying ${rooms8101} OR room${rooms8101>1?"s":""} to optimize staffing. Still available for emergencies.`;
+    }
+
+    // Distribute remaining CRNAs across OR Supv MDs
+    let mi = 0;
+    while (ci < orCRNAs.length) {
+      const md = orMDs[mi % orMDs.length];
+      orCRNAs[ci].supervisedBy = md.id;
+      md.supervises.push(orCRNAs[ci].id);
+      ci++; mi++;
+    }
+  }
+
+  // ── IR — optional single case ──
+  let irProvider = null;
+  if (cfg.ir) {
+    const allSupMDs = [...orMDs];
+    if (md8101.supervises.length > 0 && md8101.supervises.length < 3) allSupMDs.push(md8101);
+    const avMD = allSupMDs.find(m => m.supervises.length < 4);
+    if (avMD) {
+      irProvider = push({ id:`crna-${crt++}`, type:"CRNA", role:"IR CRNA", site:"IR",
+        supervisedBy: avMD.id });
+      avMD.supervises.push(irProvider.id);
+    } else {
+      irProvider = push({ id:`md-${mdt++}`, type:"MD", role:"IR MD", site:"IR",
+        supervises:[], isSolo:true, notes:"IR solo — no OR MD capacity." });
+    }
+  }
+
+  // ── Floats — minimum 3, 8101 will supervise or assign ──
+  // Never create more CRNAs than available. Use MD floats to fill gaps.
+  const mdsSoFar = asgn.filter(a => a.type === "MD").length;
+  const crnasSoFar = asgn.filter(a => a.type === "CRNA").length;
+  const crnaRemaining = Math.max(0, avail.crnas - crnasSoFar);
+  let mdRemaining = Math.max(0, avail.mds - mdsSoFar);
+
+  const floats = [];
+  const minFloats = 3;
+
+  // Allocate CRNA floats (up to what's available, capped at remaining CRNAs)
+  let crnaFloats = Math.min(crnaRemaining, minFloats);
+  // Fill any shortfall with MD floats
+  let mdFloats = 0;
+  if (crnaFloats < minFloats && mdRemaining > 0) {
+    mdFloats = Math.min(mdRemaining, minFloats - crnaFloats);
+    mdRemaining -= mdFloats;
+  }
+  // Any extra CRNAs beyond the 3 minimum also become floats
+  const extraCRNAFloats = crnaRemaining - crnaFloats;
+  if (extraCRNAFloats > 0) crnaFloats += extraCRNAFloats;
+  // Any extra MDs also become floats
+  if (mdRemaining > 0) { mdFloats += mdRemaining; mdRemaining = 0; }
+
+  for (let i = 0; i < crnaFloats; i++) {
+    floats.push(push({ id:`crna-${crt++}`, type:"CRNA", role:`Float ${i+1}`, site:"Float",
+      supervisedBy: null, isFloat:true,
+      notes:"Break relief, lunch coverage, contingency response. 8101 assigns." }));
+  }
+  for (let i = 0; i < mdFloats; i++) {
+    floats.push(push({ id:`md-${mdt++}`, type:"MD", role:`Float MD ${i+1}`, site:"Float",
+      supervises:[], isSolo:true, isFloat:true,
+      notes:"MD float — breaks, add-ons, emergencies. Covers solo." }));
+  }
+
+  // ── FINAL DEFICIT REPAIR ──
+  // If after everything, total CRNAs > available, try to convert CRNA floats → MD floats
+  let totalCRNAsNow = asgn.filter(a => a.type === "CRNA").length;
+  let totalMDsNow = asgn.filter(a => a.type === "MD").length;
+  let crnaOver = totalCRNAsNow - avail.crnas;
+  let mdAvailStill = avail.mds - totalMDsNow;
+
+  while (crnaOver > 0 && mdAvailStill > 0) {
+    // Find a CRNA float to swap out
+    const crnaFloat = floats.find(f => f.type === "CRNA");
+    if (!crnaFloat) break;
+
+    // Remove CRNA float from assignments
+    const idx = asgn.indexOf(crnaFloat);
+    if (idx >= 0) asgn.splice(idx, 1);
+    const fi = floats.indexOf(crnaFloat);
+    if (fi >= 0) floats.splice(fi, 1);
+
+    // Add MD float instead
+    const newMDFloat = push({ id:`md-${mdt++}`, type:"MD", role:`Float MD`, site:"Float",
+      supervises:[], isSolo:true, isFloat:true,
+      notes:"MD float (converted from CRNA float to resolve deficit)." });
+    floats.push(newMDFloat);
+
+    totalCRNAsNow--;
+    totalMDsNow++;
+    crnaOver--;
+    mdAvailStill--;
+  }
+
+  // ── Contingencies ──
+
+  // Trauma OR (30-40%) — float covers
+  if (floats.length > 0) {
+    const traumaFloat = floats.find(f => f.type === "CRNA") || floats[0];
+    const traumaSup = traumaFloat.type === "CRNA"
+      ? (orMDs.length > 0 ? orMDs.sort((a,b) => a.supervises.length - b.supervises.length)[0] : md8101)
+      : traumaFloat; // MD float covers solo
+    contingencies.push({
+      fromId: traumaSup.id, toId: traumaFloat.id,
+      type: "trauma", label: "Trauma OR (30-40%)",
+    });
+  }
+
+  // Emergency C-section — always a possibility (30%)
+  {
+    const emergFloat = floats.find(f => f.type === "CRNA") || floats.find(f => f.type === "MD") || md8101;
+    contingencies.push({
+      fromId: obMD.id, toId: emergFloat.id,
+      type: "emergCS", label: "Emergency C-section (30%)",
+    });
+  }
+
+  // EP TEE float coverage contingency
+  if (cfg.epTEE && floats.length > 0) {
+    const teeFloat = floats.find(f => f.type === "CRNA" && f !== (contingencies[0]?.toId ? asgn.find(a=>a.id===contingencies[0].toId) : null)) || floats[0];
+    contingencies.push({
+      fromId: epMD ? epMD.id : md8101.id, toId: teeFloat.id,
+      type: "epTEE", label: "DCCV/TEE float backup",
+    });
+  }
+
+  // DCCV/TEE CRNA helps with breaks between cases
+  if (cfg.epTEE) {
+    const teeCRNA = asgn.find(a => a.isTEE);
+    if (teeCRNA) {
+      contingencies.push({
+        fromId: teeCRNA.id, toId: teeCRNA.id,
+        type: "teeBreaks", label: "DCCV/TEE → Break relief between cases",
+      });
+    }
+  }
+
+  // Add-on room contingency
+  if (cfg.addOnRooms > 0) {
+    const addOnCRNA = asgn.find(a => a.isAddOn);
+    if (addOnCRNA) {
+      contingencies.push({
+        fromId: md8101.id, toId: addOnCRNA.id,
+        type: "addOnFlex", label: "Add-on → Breaks if unused",
+      });
+    }
+  }
+
+  // ── Notes ──
+  const mds = asgn.filter(a => a.type==="MD"), crnas = asgn.filter(a => a.type==="CRNA");
+  const totalFloats = floats.length;
+  const mdFloatCount = floats.filter(f => f.type === "MD").length;
+  const crnaFloatCount = floats.filter(f => f.type === "CRNA").length;
+  const notes = [];
+
+  if (md8101.supervises.length > 0) {
+    const orRooms = md8101.supervises.length;
+    notes.push(`📋 8101 supervising ${orRooms} OR room${orRooms>1?"s":""} to optimize staffing. Still available for emergencies.`);
+  }
+  if (md8101.supervises.length === 0) notes.push("✅ 8101 free — available for emergencies, traumas, epidurals.");
+  if (cfg.cardiac > 0) notes.push(`❤️ ${cfg.cardiac} cardiac room${cfg.cardiac>1?"s":""} — solo cardiac anesthesiologists.`);
+  if (cfg.apc > 0 && apcCRNAs.length === 0) notes.push("⚠️ APC staffed with solo MDs — no CRNAs available.");
+  if (cfg.apc > 0 && apcCRNAs.length > 0 && apcMDs.length === 2) notes.push(`🏥 APC: 1 supervising MD (1:${apcCRNAs.length}) + 1 solo MD.`);
+  if (cfg.apc > 0 && apcCRNAs.length > 0 && apcMDs.length === 1) notes.push(`🏥 APC: 1 MD supervising ${apcCRNAs.length} CRNAs (1:${apcCRNAs.length}) — MD conservation mode.`);
+  if (totalORs >= 7) notes.push(`⚠️ High Main OR volume — ${totalORs} rooms.`);
+  if (cfg.addOnRooms > 0) notes.push(`📌 ${cfg.addOnRooms} add-on room${cfg.addOnRooms>1?"s":""} (${cfg.mainOR} scheduled + ${cfg.addOnRooms} add-on = ${totalORs} total).`);
+  if (cfg.ep > 0) notes.push(`⚡ EP Lab: ${cfg.ep} room${cfg.ep>1?"s":""}${cfg.epTEE?" (includes DCCV/TEE)":""}.`);
+  if (cfg.epTEE) notes.push("☕ DCCV/TEE CRNA available for break relief between cases.");
+  if (cfg.endo > 0) notes.push(`🔬 Endo: ${cfg.endo} room${cfg.endo>1?"s":""} under dedicated Endo MD.`);
+  if (cfg.ir) notes.push("📋 IR case booked today.");
+  if (cfg.csections >= 1) notes.push(`👶 ${cfg.csections} C-section${cfg.csections>1?"s":""} scheduled.`);
+  if (cfg.csections >= 4) notes.push("🔴 High OB volume — strongly consider dedicated second OB provider.");
+  notes.push("🔴 Trauma OR (30-40%): Float provider responds.");
+  if (totalFloats < 3) notes.push(`🔴 Only ${totalFloats} float${totalFloats!==1?"s":""} — below minimum of 3. Contingency coverage compromised.`);
+  if (totalFloats >= 3) notes.push(`✅ ${totalFloats} float${totalFloats!==1?"s":""} available — ${crnaFloatCount} CRNA${crnaFloatCount!==1?"s":""} + ${mdFloatCount} MD${mdFloatCount!==1?"s":""} (minimum 3 met).`);
+  if (mdFloatCount > 0) notes.push(`🩺 ${mdFloatCount} MD float${mdFloatCount>1?"s":""} — surplus MDs covering break/contingency roles.`);
+
+  // ── Break Coverage Analysis ──
+  // Every provider in a room needs a lunch break (~30 min)
+  const provNeedingBreaks = asgn.filter(a =>
+    !a.isFloat && a.site !== "Float" && !a.is8101 &&
+    (a.type === "CRNA" || (a.type === "MD" && a.isSolo && !a.isCardiac))
+    // Cardiac MDs handle their own breaks between cases; supervising MDs don't need room relief
+  );
+  const breakDemand = provNeedingBreaks.length;
+
+  // Break sources:
+  const bkFloats = floats.length * 5;              // each float: 5 breaks
+  const bkTEE = cfg.epTEE ? 2 : 0;                // DCCV/TEE CRNA: 2 between cases
+  const bk8101 = 1;                                // 8101: 1 break
+  const bkOB = 1;                                  // OB doc: 1 break
+  const bkEP = cfg.ep > 0 ? 1 : 0;                // EP doc: 1 break (if EP active)
+  // Any supervising MD with exactly 3 CRNAs can give 1 break to one of them
+  const supMDsWith3 = mds.filter(m =>
+    !m.is8101 && !m.isSolo && !m.isCardiac && m.supervises && m.supervises.length >= 3
+  ).length;
+  const bkSupMDs = supMDsWith3;                    // 1 break each
+
+  const breakSources = [
+    { label: "Floats", count: floats.length, breaks: bkFloats, detail: `${floats.length} × 5` },
+    ...(bkTEE > 0 ? [{ label: "DCCV/TEE CRNA", count: 1, breaks: bkTEE, detail: "between cases" }] : []),
+    { label: "8101", count: 1, breaks: bk8101, detail: "schedule runner" },
+    { label: "OB MD", count: 1, breaks: bkOB, detail: "between cases" },
+    ...(bkEP > 0 ? [{ label: "EP MD", count: 1, breaks: bkEP, detail: "between cases" }] : []),
+    ...(bkSupMDs > 0 ? [{ label: `Supv MDs (≥1:3)`, count: supMDsWith3, breaks: bkSupMDs, detail: `${supMDsWith3} × 1` }] : []),
+  ];
+
+  const breakCapacity = bkFloats + bkTEE + bk8101 + bkOB + bkEP + bkSupMDs;
+  const breakGap = breakDemand - breakCapacity;
+  const breakPct = breakDemand > 0 ? Math.round((breakCapacity / breakDemand) * 100) : 100;
+
+  const breakAnalysis = {
+    demand: breakDemand,
+    capacity: breakCapacity,
+    sources: breakSources,
+    gap: breakGap,
+    pct: Math.min(breakPct, 100),
+    severity: breakPct >= 100 ? "ok" : breakPct >= 75 ? "tight" : breakPct >= 50 ? "warning" : "critical",
+    unrelieved: Math.max(0, breakGap),
+  };
+
+  // Break notes under Notes & Warnings
+  notes.push("── BREAK COVERAGE ──");
+  breakSources.forEach(s => notes.push(`  ☕ ${s.label}: ${s.breaks} break${s.breaks!==1?"s":""} (${s.detail})`));
+  notes.push(`  📊 Total: ${breakCapacity} break slots for ${breakDemand} providers needing breaks`);
+  if (breakAnalysis.severity === "ok") notes.push(`  ✅ Coverage sufficient (${breakPct}%).`);
+  if (breakAnalysis.severity === "tight") notes.push(`  ⚠️ Coverage tight (${breakPct}%). Some breaks may be delayed.`);
+  if (breakAnalysis.severity === "warning") notes.push(`  🔴 Coverage strained (${breakPct}%). ${breakAnalysis.unrelieved} providers may not get timely breaks.`);
+  if (breakAnalysis.severity === "critical") notes.push(`  🚨 CRITICAL (${breakPct}%). ${breakAnalysis.unrelieved} providers will not get breaks without pulling coverage.`);
+
+  return { mds, crnas, totalMDs:mds.length, totalCRNAs:crnas.length, totalStaff:mds.length+crnas.length, assignments:asgn, notes, contingencies, breakAnalysis };
+}
+
+// ─── Stepper ─────────────────────────────────────────────────────
+function Stepper({ value, onChange, min = 0, max = 30, color }) {
+  const bc = color || C.accent;
+  return (
+    <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+      <button onClick={()=>onChange(Math.max(min,value-1))} style={{ width:26, height:26, borderRadius:6, border:`1px solid ${bc}`, background:"transparent", color:bc, fontSize:16, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>−</button>
+      <span style={{ color:C.text, fontSize:16, fontWeight:700, fontFamily:"'DM Sans',sans-serif", minWidth:22, textAlign:"center" }}>{value}</span>
+      <button onClick={()=>onChange(Math.min(max,value+1))} style={{ width:26, height:26, borderRadius:6, border:`1px solid ${bc}`, background:"transparent", color:bc, fontSize:16, cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>+</button>
+    </div>
+  );
+}
+
+// ─── Left Panel ──────────────────────────────────────────────────
+function LeftPanel({ cfg, setCfg }) {
+  const up = (k, v) => setCfg(p => ({ ...p, [k]: v }));
+  const lbl = { color:C.textDim, fontSize:11, fontWeight:600, fontFamily:"'DM Sans',sans-serif" };
+  const row = { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"4px 0" };
+  const section = (title) => (
+    <div style={{ color:C.textMuted, fontSize:10, fontWeight:700, letterSpacing:"0.08em", margin:"8px 0 2px", borderBottom:`1px solid ${C.border}`, paddingBottom:3 }}>{title}</div>
+  );
+
+  return (
+    <div style={{ padding:"14px 16px", background:C.card, borderRadius:14, border:`1px solid ${C.border}` }}>
+      <div style={{ color:C.accent, fontSize:13, fontWeight:700, fontFamily:"'DM Sans',sans-serif", marginBottom:8 }}>📋 Site Configuration</div>
+
+      {section("MAIN OR (4th Floor)")}
+      <div style={row}><span style={lbl}>Main ORs (0-9)</span><Stepper value={cfg.mainOR} onChange={v=>up("mainOR",v)} max={9} color={C.md} /></div>
+      <div style={row}><span style={lbl}>Add-On Rooms</span><Stepper value={cfg.addOnRooms} onChange={v=>up("addOnRooms",v)} max={3} color={C.warning} /></div>
+
+      {section("APC (1st Floor)")}
+      <div style={row}><span style={lbl}>APC Rooms (0-4)</span><Stepper value={cfg.apc} onChange={v=>up("apc",v)} max={4} color={C.solo} /></div>
+
+      {section("CARDIAC / TAVR")}
+      <div style={row}><span style={lbl}>Cardiac Rooms (0-4)</span><Stepper value={cfg.cardiac} onChange={v=>up("cardiac",v)} max={4} color={C.cardiac} /></div>
+
+      {section("ENDO (GI)")}
+      <div style={row}><span style={lbl}>Endo Rooms (0-4)</span><Stepper value={cfg.endo} onChange={v=>up("endo",v)} max={4} color={C.endo} /></div>
+
+      {section("EP LAB")}
+      <div style={row}><span style={lbl}>EP Rooms (0-4)</span><Stepper value={cfg.ep} onChange={v=>up("ep",v)} max={4} color={C.ep} /></div>
+      {cfg.ep > 0 && (
+        <div style={row}>
+          <span style={lbl}>DCCV / TEEs</span>
+          <button onClick={()=>up("epTEE",!cfg.epTEE)} style={{
+            padding:"4px 12px", borderRadius:6, fontSize:11, fontWeight:700, cursor:"pointer",
+            background: cfg.epTEE ? C.ep+"25" : "transparent",
+            border:`1.5px solid ${cfg.epTEE ? C.ep : C.border}`,
+            color: cfg.epTEE ? C.ep : C.textMuted,
+          }}>{cfg.epTEE ? "ON — 1 room" : "OFF"}</button>
+        </div>
+      )}
+
+      {section("OB")}
+      <div style={row}><span style={lbl}>C-Sections</span><Stepper value={cfg.csections} onChange={v=>up("csections",v)} max={8} color={C.ob} /></div>
+
+      {section("OTHER")}
+      <div style={row}>
+        <span style={lbl}>IR Case Booked</span>
+        <button onClick={()=>up("ir",!cfg.ir)} style={{
+          padding:"4px 12px", borderRadius:6, fontSize:11, fontWeight:700, cursor:"pointer",
+          background: cfg.ir ? C.ir+"25" : "transparent",
+          border:`1.5px solid ${cfg.ir ? C.ir : C.border}`,
+          color: cfg.ir ? C.ir : C.textMuted,
+        }}>{cfg.ir ? "YES" : "NO"}</button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Available Staff Bar ─────────────────────────────────────────
+function StaffAvailBar({ avail, setAvail }) {
+  const row = { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"4px 0" };
+  const lbl = { color:C.textDim, fontSize:11, fontWeight:600, fontFamily:"'DM Sans',sans-serif" };
+  return (
+    <div style={{
+      padding: "14px 16px", background: C.card, border: `1px solid ${C.border}`, borderRadius: 14,
+    }}>
+      <div style={{ color: C.accent, fontSize: 13, fontWeight: 700, fontFamily: "'DM Sans',sans-serif", marginBottom: 8 }}>👥 Available Staff</div>
+      <div style={row}><span style={lbl}>MDs Available</span><Stepper value={avail.mds} onChange={v => setAvail(p => ({ ...p, mds: v }))} max={30} color={C.md} /></div>
+      <div style={row}><span style={lbl}>CRNAs Available</span><Stepper value={avail.crnas} onChange={v => setAvail(p => ({ ...p, crnas: v }))} max={30} color={C.crna} /></div>
+    </div>
+  );
+}
+
+// ─── Break Coverage Alert ─────────────────────────────────────────
+function BreakCoverageAlert({ breakAnalysis }) {
+  if (!breakAnalysis) return null;
+  const b = breakAnalysis;
+  const colors = {
+    ok: { bg: "rgba(74,232,160,0.06)", border: C.success, text: C.success, icon: "✅" },
+    tight: { bg: "rgba(232,200,84,0.08)", border: C.warning, text: C.warning, icon: "⚠️" },
+    warning: { bg: "rgba(232,84,84,0.06)", border: "#E88854", text: "#E88854", icon: "🔴" },
+    critical: { bg: "rgba(232,84,84,0.12)", border: C.danger, text: C.danger, icon: "🚨" },
+  };
+  const s = colors[b.severity] || colors.warning;
+
+  // Progress bar percentage
+  const barPct = Math.min(b.pct, 100);
+
+  return (
+    <div style={{
+      background: s.bg, border: `1px solid ${s.border}`, borderRadius: 10,
+      padding: "12px 16px", marginBottom: 12,
+    }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 14 }}>{s.icon}</span>
+          <span style={{ color: s.text, fontWeight: 700, fontSize: 12, fontFamily: "'DM Sans',sans-serif" }}>
+            BREAK COVERAGE {b.severity === "ok" ? "" : b.severity === "tight" ? "— TIGHT" : b.severity === "warning" ? "— STRAINED" : "— CRITICAL"}
+          </span>
+          <span style={{ color: C.textMuted, fontSize: 9, fontWeight: 400, fontStyle: "italic" }}>(assuming supervising MDs & 8101 help with breaks)</span>
+        </div>
+        <span style={{ color: s.text, fontWeight: 800, fontSize: 14, fontFamily: "'DM Sans',sans-serif" }}>
+          {b.pct}%
+        </span>
+      </div>
+
+      {/* Progress bar */}
+      <div style={{
+        width: "100%", height: 8, borderRadius: 4,
+        background: "rgba(255,255,255,0.06)", overflow: "hidden", marginBottom: 8,
+      }}>
+        <div style={{
+          width: `${barPct}%`, height: "100%", borderRadius: 4,
+          background: s.border,
+          transition: "width 0.4s ease",
+        }} />
+      </div>
+
+      {/* Detail row */}
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
+        <span style={{ color: C.text, fontSize: 11, fontFamily: "'DM Sans',sans-serif" }}>
+          <span style={{ fontWeight: 700 }}>{b.demand}</span> <span style={{ color: C.textDim }}>providers need breaks</span>
+        </span>
+        <span style={{ color: C.text, fontSize: 11, fontFamily: "'DM Sans',sans-serif" }}>
+          <span style={{ fontWeight: 700 }}>{b.capacity}</span> <span style={{ color: C.textDim }}>break slots available</span>
+        </span>
+        {b.unrelieved > 0 && (
+          <span style={{
+            background: s.border, color: "#fff", fontSize: 11, fontWeight: 700,
+            padding: "2px 8px", borderRadius: 6, fontFamily: "'DM Sans',sans-serif",
+          }}>
+            {b.unrelieved} provider{b.unrelieved > 1 ? "s" : ""} without break coverage
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Staffing Summary — Paoli Style ──────────────────────────────
+function StaffingSummary({ result, avail }) {
+  const mdGap = result.totalMDs - avail.mds;
+  const crnaGap = result.totalCRNAs - avail.crnas;
+  const mdOk = mdGap <= 0;
+  const crnaOk = crnaGap <= 0;
+  const allGood = mdOk && crnaOk;
+
+  return (
+    <div style={{
+      background: allGood ? "rgba(74,232,160,0.04)" : "rgba(232,84,84,0.04)",
+      border: `1.5px solid ${allGood ? C.success : C.danger}`,
+      borderRadius: 12, padding: "14px 18px", marginBottom: 12,
+      display: "flex", flexDirection: "column", gap: 10,
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 18 }}>{allGood ? "✅" : "🚨"}</span>
+        <span style={{
+          color: allGood ? C.success : C.danger,
+          fontWeight: 700, fontSize: 14, fontFamily: "'DM Sans',sans-serif",
+        }}>
+          {allGood ? "Fully Staffed — No Additional Providers Needed" : "Staff Shortage — Need to Acquire Providers"}
+        </span>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        {/* MD Card */}
+        <div style={{
+          background: C.card, borderRadius: 10, padding: "12px 14px",
+          border: `1px solid ${mdOk ? C.success : C.danger}`,
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <span style={{ color: C.md, fontWeight: 700, fontSize: 12, fontFamily: "'DM Sans',sans-serif" }}>MDs</span>
+            <span style={{
+              background: mdOk ? "rgba(74,232,160,0.15)" : "rgba(232,84,84,0.15)",
+              color: mdOk ? C.success : C.danger,
+              fontWeight: 800, fontSize: 11, padding: "2px 8px", borderRadius: 5,
+              fontFamily: "'DM Sans',sans-serif",
+            }}>
+              {mdOk ? "COVERED" : `NEED ${mdGap}`}
+            </span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", color: C.textDim, fontSize: 13, marginTop: 2 }}>
+            <span>Required: <b style={{ color: C.text, fontSize: 15 }}>{result.totalMDs}</b></span>
+            <span>Available: <b style={{ color: C.text, fontSize: 15 }}>{avail.mds}</b></span>
+          </div>
+          {!mdOk && (
+            <div style={{ marginTop: 8, background: C.bg, borderRadius: 6, padding: "6px 8px" }}>
+              <div style={{ color: C.danger, fontSize: 11, fontWeight: 600 }}>
+                📥 Acquire {mdGap} MD{mdGap > 1 ? "s" : ""} from another site
+              </div>
+            </div>
+          )}
+          {mdOk && avail.mds > result.totalMDs && (
+            <div style={{ marginTop: 8, background: C.bg, borderRadius: 6, padding: "6px 8px" }}>
+              <div style={{ color: C.success, fontSize: 11, fontWeight: 600 }}>
+                📤 {avail.mds - result.totalMDs} surplus MD{(avail.mds - result.totalMDs) > 1 ? "s" : ""} — can send to another site
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* CRNA Card */}
+        <div style={{
+          background: C.card, borderRadius: 10, padding: "12px 14px",
+          border: `1px solid ${crnaOk ? C.success : C.danger}`,
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <span style={{ color: C.crna, fontWeight: 700, fontSize: 12, fontFamily: "'DM Sans',sans-serif" }}>CRNAs</span>
+            <span style={{
+              background: crnaOk ? "rgba(74,232,160,0.15)" : "rgba(232,84,84,0.15)",
+              color: crnaOk ? C.success : C.danger,
+              fontWeight: 800, fontSize: 11, padding: "2px 8px", borderRadius: 5,
+              fontFamily: "'DM Sans',sans-serif",
+            }}>
+              {crnaOk ? "COVERED" : `NEED ${crnaGap}`}
+            </span>
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", color: C.textDim, fontSize: 13, marginTop: 2 }}>
+            <span>Required: <b style={{ color: C.text, fontSize: 15 }}>{result.totalCRNAs}</b></span>
+            <span>Available: <b style={{ color: C.text, fontSize: 15 }}>{avail.crnas}</b></span>
+          </div>
+          {!crnaOk && (
+            <div style={{ marginTop: 8, background: C.bg, borderRadius: 6, padding: "6px 8px" }}>
+              <div style={{ color: C.danger, fontSize: 11, fontWeight: 600 }}>
+                📥 Acquire {crnaGap} CRNA{crnaGap > 1 ? "s" : ""} from another site
+              </div>
+            </div>
+          )}
+          {crnaOk && avail.crnas > result.totalCRNAs && (
+            <div style={{ marginTop: 8, background: C.bg, borderRadius: 6, padding: "6px 8px" }}>
+              <div style={{ color: C.success, fontSize: 11, fontWeight: 600 }}>
+                📤 {avail.crnas - result.totalCRNAs} surplus CRNA{(avail.crnas - result.totalCRNAs) > 1 ? "s" : ""} — can send to another site
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Lane Diagram ────────────────────────────────────────────────
+function StaffingDiagram({ result, setResult }) {
+  const [selectedCRNA, setSelectedCRNA] = useState(null);
+  const [dropTarget, setDropTarget] = useState(null);
+  const { mds, crnas, contingencies = [] } = result;
+
+  const byMD = {};
+  mds.forEach(m => { byMD[m.id] = []; });
+  crnas.forEach(c => { if (c.supervisedBy && byMD[c.supervisedBy]) byMD[c.supervisedBy].push(c); });
+
+  // Shared reassign logic used by both click and drag-and-drop
+  const reassignCRNAToMD = (crnaId, mdId) => {
+    setResult(prev => {
+      const na = prev.assignments.map(a => ({ ...a, supervises: [...(a.supervises || [])] }));
+      const c = na.find(a => a.id === crnaId);
+      const old = na.find(a => a.id === c.supervisedBy);
+      const nw = na.find(a => a.id === mdId);
+      if (old) old.supervises = old.supervises.filter(id => id !== crnaId);
+      c.supervisedBy = mdId;
+      c.site = nw.site; // move to new MD's site
+      if (!nw.supervises.includes(crnaId)) nw.supervises.push(crnaId);
+      nw.isSolo = false;
+      return { ...prev, assignments: na, mds: na.filter(a => a.type === "MD"), crnas: na.filter(a => a.type === "CRNA") };
+    });
+  };
+
+  const moveMDToSite = (mdId, newSite) => {
+    setResult(prev => {
+      const na = prev.assignments.map(a => ({ ...a, supervises: [...(a.supervises || [])] }));
+      const md = na.find(a => a.id === mdId);
+      if (md) md.site = newSite;
+      return { ...prev, assignments: na, mds: na.filter(a => a.type === "MD"), crnas: na.filter(a => a.type === "CRNA") };
+    });
+  };
+
+  // Click handlers (existing)
+  const onCRNAClick = crna => setSelectedCRNA(prev => prev === crna.id ? null : crna.id);
+  const onMDClick = md => {
+    if (!selectedCRNA) return;
+    reassignCRNAToMD(selectedCRNA, md.id);
+    setSelectedCRNA(null);
+  };
+
+  // Drag handlers
+  const onDragStartCRNA = (e, crna) => {
+    e.dataTransfer.setData("crnaId", crna.id);
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const onDragStartMD = (e, md) => {
+    e.dataTransfer.setData("mdId", md.id);
+    e.dataTransfer.effectAllowed = "move";
+  };
+  const onDropOnMD = (e, md) => {
+    e.preventDefault();
+    setDropTarget(null);
+    const crnaId = e.dataTransfer.getData("crnaId");
+    if (crnaId) reassignCRNAToMD(crnaId, md.id);
+  };
+  const onDropOnLane = (e, siteKey) => {
+    e.preventDefault();
+    setDropTarget(null);
+    const mdId = e.dataTransfer.getData("mdId");
+    if (mdId) moveMDToSite(mdId, siteKey);
+  };
+  const onDragOver = (e, targetId) => { e.preventDefault(); setDropTarget(targetId); };
+  const onDragLeave = () => setDropTarget(null);
+
+  const CRNAChip = ({ crna }) => {
+    const sel = selectedCRNA === crna.id;
+    const addOn = crna.isAddOn;
+    return (
+      <div
+        draggable
+        onDragStart={e => onDragStartCRNA(e, crna)}
+        onClick={e => { e.stopPropagation(); onCRNAClick(crna); }}
+        style={{
+          display: "flex", alignItems: "center", gap: 5,
+          padding: "5px 10px", borderRadius: 20,
+          background: sel ? C.accentGlow : C.bg,
+          border: `1.5px ${addOn ? "dashed" : "solid"} ${sel ? C.accent : addOn ? C.warning + "80" : C.border}`,
+          cursor: "grab", transition: "all 0.15s", whiteSpace: "nowrap", flexShrink: 0,
+        }}>
+        <div style={{ width: 8, height: 8, borderRadius: 4, flexShrink: 0, background: addOn ? C.warning : C.crna }} />
+        <span style={{ color: sel ? C.accent : C.text, fontSize: 11, fontWeight: 600, fontFamily: "'DM Sans',sans-serif" }}>{crna.role}</span>
+      </div>
+    );
+  };
+
+  const MDBlock = ({ md, siteFilter }) => {
+    const isSolo = md.isSolo;
+    const borderCol = isSolo ? (md.isCardiac ? C.cardiac : md.is8101 ? C.c8101 : md.isFloat ? C.floatCol : C.solo) : C.md;
+    const canAccept = !!selectedCRNA;
+    const isHovered = dropTarget === md.id;
+    const allCRNAs = byMD[md.id] || [];
+    // 8101 supervises across multiple sites — don't filter
+    const myCRNAs = (siteFilter && !md.is8101) ? allCRNAs.filter(c => c.site === siteFilter) : allCRNAs;
+
+    return (
+      <div
+        draggable
+        onDragStart={e => onDragStartMD(e, md)}
+        onDrop={e => onDropOnMD(e, md)}
+        onDragOver={e => onDragOver(e, md.id)}
+        onDragLeave={onDragLeave}
+        onClick={() => onMDClick(md)}
+        style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", cursor: selectedCRNA ? "pointer" : "grab" }}
+      >
+        <div style={{
+          display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", borderRadius: 10,
+          background: (canAccept || isHovered) ? `${C.success}15` : C.card,
+          border: `2px solid ${(canAccept || isHovered) ? C.success : borderCol}`,
+          boxShadow: isHovered ? `0 0 14px ${C.success}50` : canAccept ? `0 0 10px ${C.success}30` : "0 1px 4px rgba(0,0,0,0.2)",
+          minWidth: 120, flexShrink: 0, transition: "all 0.2s",
+        }}>
+          <div style={{
+            width: 26, height: 26, borderRadius: 7,
+            background: borderCol + "20", border: `2px solid ${borderCol}`,
+            display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+          }}>
+            <span style={{ color: borderCol, fontSize: 9, fontWeight: 800, fontFamily: "'DM Sans',sans-serif" }}>MD</span>
+          </div>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ color: C.text, fontSize: 11, fontWeight: 700, fontFamily: "'DM Sans',sans-serif", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{md.role}</div>
+            <div style={{ display: "flex", gap: 4, alignItems: "center", marginTop: 1 }}>
+              {isSolo && <span style={{ background: borderCol, color: "#fff", fontSize: 7, fontWeight: 800, padding: "1px 4px", borderRadius: 3 }}>SOLO</span>}
+              {md.is8101 && <span style={{ background: C.c8101, color: C.bg, fontSize: 7, fontWeight: 800, padding: "1px 4px", borderRadius: 3 }}>8101</span>}
+              {myCRNAs.length > 0 && <span style={{ color: C.textMuted, fontSize: 9 }}>{myCRNAs.length} CRNA{myCRNAs.length > 1 ? "s" : ""}</span>}
+            </div>
+          </div>
+        </div>
+        {myCRNAs.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", flexShrink: 0, color: borderCol, opacity: 0.5 }}>
+            <div style={{ width: 20, height: 2, background: borderCol, opacity: 0.4 }} />
+            <span style={{ fontSize: 12 }}>›</span>
+          </div>
+        )}
+        {myCRNAs.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, minWidth: 0 }}>
+            {myCRNAs.map(crna => <CRNAChip key={crna.id} crna={crna} />)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // Site lanes config
+  const siteConfig = [
+    { key: "8101", label: "8101 — Schedule Runner", color: C.c8101, icon: "📋" },
+    { key: "Main OR", label: "Main OR (4th Floor)", color: C.md, icon: "🏥" },
+    { key: "APC", label: "APC (Surgery Center)", color: C.solo, icon: "🔧" },
+    { key: "Cardiac", label: "Cardiac / TAVR", color: C.cardiac, icon: "❤️" },
+    { key: "Endo", label: "Endoscopy (GI)", color: C.endo, icon: "🔬" },
+    { key: "EP Lab", label: "EP Lab", color: C.ep, icon: "⚡" },
+    { key: "OB", label: "OB / L&D", color: C.ob, icon: "👶" },
+    { key: "IR", label: "IR", color: C.ir, icon: "📡" },
+    { key: "Float", label: "Float Pool", color: C.floatCol, icon: "🔄" },
+  ];
+
+  const mdsBySite = {};
+  mds.forEach(md => {
+    const s = md.site || "Other";
+    if (!mdsBySite[s]) mdsBySite[s] = [];
+    mdsBySite[s].push(md);
+  });
+
+  const activeSites = siteConfig.filter(s => {
+    if (mdsBySite[s.key]?.length > 0) return true;
+    if (crnas.some(c => c.site === s.key)) return true;
+    return false;
+  });
+
+  return (
+    <div>
+      {selectedCRNA && (
+        <div style={{ background: C.accentGlow, border: `1px solid ${C.accent}`, borderRadius: 8, padding: "7px 14px", marginBottom: 12, color: C.accent, fontSize: 12, fontWeight: 500, display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 14 }}>🔄</span> CRNA selected — click any MD to reassign
+          <button onClick={() => setSelectedCRNA(null)} style={{ marginLeft: "auto", background: "transparent", border: `1px solid ${C.accent}`, color: C.accent, borderRadius: 5, padding: "2px 10px", cursor: "pointer", fontSize: 11 }}>Cancel</button>
+        </div>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        {activeSites.map((site, si) => {
+          const siteMDs = mdsBySite[site.key] || [];
+          const siteCRNAs = crnas.filter(c => c.site === site.key);
+          const isFloatPool = site.key === "Float";
+          // For 8101, count all CRNAs supervised by 8101 regardless of site
+          const is8101Lane = site.key === "8101";
+          const displayCRNACount = is8101Lane
+            ? crnas.filter(c => siteMDs.some(m => m.supervises?.includes(c.id))).length
+            : siteCRNAs.length;
+
+          return (
+            <div
+              key={site.key}
+              onDrop={e => onDropOnLane(e, site.key)}
+              onDragOver={e => onDragOver(e, "lane-" + site.key)}
+              onDragLeave={onDragLeave}
+              style={{
+                display: "flex", borderRadius: 10, overflow: "hidden",
+                background: dropTarget === "lane-" + site.key ? `${site.color}15` : (si % 2 === 0 ? "rgba(255,255,255,0.015)" : "transparent"),
+                border: dropTarget === "lane-" + site.key ? `1.5px dashed ${site.color}` : "1.5px solid transparent",
+                transition: "all 0.2s",
+              }}
+            >
+              <div style={{ width: 130, flexShrink: 0, padding: "12px 10px", borderLeft: `3px solid ${site.color}`, display: "flex", flexDirection: "column", justifyContent: "center", gap: 2 }}>
+                <span style={{ fontSize: 14 }}>{site.icon}</span>
+                <span style={{ color: site.color, fontSize: 10, fontWeight: 700, fontFamily: "'DM Sans',sans-serif", lineHeight: 1.2 }}>{site.label}</span>
+                <span style={{ color: C.textMuted, fontSize: 9 }}>
+                  {siteMDs.length > 0 ? `${siteMDs.length} MD${siteMDs.length>1?"s":""}` : ""}
+                  {siteMDs.length > 0 && displayCRNACount > 0 ? " + " : ""}
+                  {displayCRNACount > 0 ? `${displayCRNACount} CRNA${displayCRNACount>1?"s":""}` : ""}
+                </span>
+              </div>
+              <div style={{ width: 1, background: C.border, margin: "8px 0", flexShrink: 0 }} />
+              <div style={{ flex: 1, padding: "4px 12px", minWidth: 0, display: "flex", alignItems: "center" }}>
+                {isFloatPool && siteMDs.length === 0 ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "8px 0" }}>
+                    {siteCRNAs.map(crna => <CRNAChip key={crna.id} crna={crna} />)}
+                    <span style={{ color: C.textMuted, fontSize: 9, fontStyle: "italic" }}>8101 will supervise or assign</span>
+                  </div>
+                ) : isFloatPool && siteMDs.length > 0 ? (
+                  <div style={{ width: "100%" }}>
+                    {siteMDs.map(md => <MDBlock key={md.id + site.key} md={md} siteFilter={site.key} />)}
+                    {siteCRNAs.length > 0 && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", padding: "4px 0 8px" }}>
+                        {siteCRNAs.map(crna => <CRNAChip key={crna.id} crna={crna} />)}
+                        <span style={{ color: C.textMuted, fontSize: 9, fontStyle: "italic" }}>8101 will supervise or assign</span>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div style={{ width: "100%" }}>
+                    {siteMDs.map(md => <MDBlock key={md.id + site.key} md={md} siteFilter={site.key} />)}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Contingency Coverage */}
+      {contingencies.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ color: C.textMuted, fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", fontFamily: "'DM Sans',sans-serif", marginBottom: 8 }}>CONTINGENCY COVERAGE</div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            {contingencies.map((cg, i) => {
+              const from = result.assignments.find(a => a.id === cg.fromId);
+              const to = result.assignments.find(a => a.id === cg.toId);
+              if (!from || !to) return null;
+              const typeMap = {
+                trauma: { col: C.trauma, bg: C.traumaGlow, icon: "🚨" },
+                emergCS: { col: C.danger, bg: C.traumaGlow, icon: "🚨" },
+                epTEE: { col: C.ep, bg: C.epGlow, icon: "⚡" },
+                teeBreaks: { col: C.ep, bg: C.epGlow, icon: "☕" },
+                addOnFlex: { col: C.floatCol, bg: C.floatGlow, icon: "♻️" },
+                irFlex: { col: C.ir, bg: C.irGlow, icon: "📡" },
+              };
+              const t = typeMap[cg.type] || { col: C.textDim, bg: C.bg, icon: "📌" };
+              return (
+                <div key={i} style={{ flex: "1 1 220px", background: t.bg, border: `1.5px solid ${t.col}`, borderRadius: 10, padding: "10px 14px" }}>
+                  <div style={{ color: t.col, fontSize: 11, fontWeight: 700, fontFamily: "'DM Sans',sans-serif", marginBottom: 6, display: "flex", alignItems: "center", gap: 5 }}>
+                    <span style={{ fontSize: 13 }}>{t.icon}</span>{cg.label}
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ background: C.bg, border: `1.5px solid ${C.md}`, borderRadius: 5, padding: "2px 7px", fontWeight: 700, fontFamily: "'DM Sans',sans-serif", fontSize: 10, color: C.text }}>{from.role}</span>
+                    {cg.fromId !== cg.toId && (<>
+                      <span style={{ color: t.col, fontSize: 14, fontWeight: 800 }}>→</span>
+                      <span style={{ background: C.bg, border: `1.5px solid ${C.crna}`, borderRadius: 8, padding: "2px 7px", fontWeight: 700, fontFamily: "'DM Sans',sans-serif", fontSize: 10, color: C.text }}>{to.role}</span>
+                    </>)}
+                    {cg.fromId === cg.toId && (
+                      <span style={{ color: t.col, fontSize: 10, fontStyle: "italic" }}>covers independently</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Legend */}
+      <div style={{ marginTop: 12, padding: "8px 12px", background: C.bg, borderRadius: 8, border: `1px solid ${C.border}`, display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+        <span style={{ color: C.textMuted, fontSize: 9, fontWeight: 700, letterSpacing: "0.06em" }}>LEGEND</span>
+        {[
+          { b: C.md, l: "Supervising MD", s: "r" },
+          { b: C.solo, l: "Solo MD", s: "r" },
+          { b: C.cardiac, l: "Cardiac MD", s: "r" },
+          { b: C.c8101, l: "8101", s: "r" },
+          { b: C.crna, l: "CRNA", s: "d" },
+          { b: C.warning, l: "Add-On", s: "d", da: true },
+        ].map(i => (
+          <div key={i.l} style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <div style={{ width: i.s === "d" ? 8 : 12, height: i.s === "d" ? 8 : 10, borderRadius: i.s === "d" ? 4 : 3, border: `2px ${i.da ? "dashed" : "solid"} ${i.b}`, background: C.card, flexShrink: 0 }} />
+            <span style={{ color: C.textDim, fontSize: 9 }}>{i.l}</span>
+          </div>
+        ))}
+        <span style={{ color: C.textMuted, fontSize: 9 }}>💡 Click CRNA → click MD to reassign &nbsp;|&nbsp; Drag CRNA onto MD &nbsp;|&nbsp; Drag MD to new site lane</span>
+      </div>
+    </div>
+  );
+}
+
+// ─── Notes Panel ─────────────────────────────────────────────────
+function NotesPanel({ notes, result }) {
+  const warnings = [];
+  result.mds.forEach(md => {
+    if (md.supervises && md.supervises.length > 4)
+      warnings.push(`🔴 ${md.role} supervising ${md.supervises.length} CRNAs (above 1:4)`);
+    else if (md.supervises && md.supervises.length > 3 && !md.is8101)
+      warnings.push(`⚠️ ${md.role} supervising ${md.supervises.length} CRNAs (above 1:3)`);
+  });
+  const floatCount = result.assignments.filter(a => a.isFloat || a.site === "Float").length;
+  if (floatCount < 3) warnings.push(`🔴 Float pool below minimum: ${floatCount}/3`);
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+      {warnings.length > 0 && (
+        <div style={{ background:"rgba(232,84,84,0.08)", border:`1px solid ${C.danger}`, borderRadius:10, padding:14 }}>
+          <div style={{ color:C.danger, fontWeight:700, fontSize:12, marginBottom:6 }}>⚠️ WARNINGS</div>
+          {warnings.map((w,i) => <div key={i} style={{ color:C.text, fontSize:12, padding:"3px 0" }}>{w}</div>)}
+        </div>
+      )}
+      <div style={{ background:C.bg, borderRadius:10, padding:14, border:`1px solid ${C.border}` }}>
+        <div style={{ color:C.accent, fontWeight:700, fontSize:12, marginBottom:6 }}>📝 STAFFING NOTES</div>
+        {notes.map((n,i) => <div key={i} style={{ color:C.text, fontSize:12, padding:"3px 0" }}>{n}</div>)}
+      </div>
+    </div>
+  );
+}
+
+// ─── Assignment Table ────────────────────────────────────────────
+function AssignmentTable({ result }) {
+  return (
+    <div style={{ overflowX:"auto" }}>
+      <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12, fontFamily:"'DM Sans',sans-serif" }}>
+        <thead>
+          <tr>{["Provider","Type","Site","Role","Supervised By","Notes"].map(h => (
+            <th key={h} style={{ textAlign:"left", padding:"8px 10px", color:C.textMuted, fontWeight:700, fontSize:10, letterSpacing:"0.06em", borderBottom:`1px solid ${C.border}` }}>{h}</th>
+          ))}</tr>
+        </thead>
+        <tbody>
+          {result.assignments.map((a,i) => {
+            const sup = a.supervisedBy ? result.assignments.find(x => x.id === a.supervisedBy) : null;
+            return (
+              <tr key={a.id} style={{ background: i%2===0 ? "transparent" : "rgba(255,255,255,0.015)" }}>
+                <td style={{ padding:"6px 10px", color:C.text, fontWeight:600 }}>{a.role}</td>
+                <td style={{ padding:"6px 10px" }}><span style={{ color:a.type==="MD"?C.md:C.crna, fontWeight:700 }}>{a.type}</span></td>
+                <td style={{ padding:"6px 10px", color:C.textDim }}>{a.site}</td>
+                <td style={{ padding:"6px 10px", color:C.textDim }}>{a.isSolo?"Solo":a.supervises?.length>0?`Supv (${a.supervises.length})`:""}</td>
+                <td style={{ padding:"6px 10px", color:C.textDim }}>{sup?sup.role:"—"}</td>
+                <td style={{ padding:"6px 10px", color:C.textMuted, fontSize:11 }}>{a.notes||""}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ─── Main App ────────────────────────────────────────────────────
+function LankenauStaffingApp() {
+  const [cfg, setCfg] = useState({
+    mainOR: 7, addOnRooms: 0,
+    apc: 3, cardiac: 2, endo: 3, ep: 3, epTEE: false,
+    csections: 1, ir: false,
+  });
+  const [avail, setAvail] = useState({ mds: 12, crnas: 18 });
+  const [result, setResult] = useState(null);
+  const [tab, setTab] = useState("diagram");
+  const clock = useClock();
+
+  useEffect(() => { setResult(calcStaffing(cfg, avail)); }, [cfg, avail]);
+
+  if (!result) return null;
+
+  return (
+    <div style={{ minHeight:"100vh", background:C.bg, fontFamily:"'DM Sans',-apple-system,sans-serif", color:C.text }}>
+      <div style={{ display:"flex", maxWidth:1400, margin:"0 auto", padding:16, gap:16, alignItems:"flex-start" }}>
+        <div style={{ width: 310, flexShrink: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+          <LeftPanel cfg={cfg} setCfg={setCfg} />
+          <StaffAvailBar avail={avail} setAvail={setAvail} />
+        </div>
+        <div style={{ flex:1, minWidth:0 }}>
+          {/* Header */}
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:14 }}>
+            <div>
+              <h1 style={{ margin:0, fontSize:19, fontWeight:800, letterSpacing:"-0.03em", color:C.text }}>UAS — Anesthesia Staffing Optimizer</h1>
+              <p style={{ margin:0, fontSize:12, color:C.textDim, marginTop:1 }}>Lankenau Medical Center &middot; Daily staffing optimization</p>
+            </div>
+            <div style={{ border:`1px solid ${C.border}`, borderRadius:8, padding:"6px 12px", textAlign:"right" }}>
+              <div style={{ color:C.accent, fontSize:13, fontWeight:700 }}>{clock.time}</div>
+              <div style={{ color:C.textDim, fontSize:10 }}>{clock.day} &middot; {clock.month} {clock.date}, {clock.year}</div>
+            </div>
+          </div>
+
+          <StaffingSummary result={result} avail={avail} />
+          <BreakCoverageAlert breakAnalysis={result.breakAnalysis} />
+
+          {/* Tabs */}
+          <div style={{ display:"flex", gap:4, marginBottom:14 }}>
+            {[{id:"diagram",label:"📊 Visual Diagram"},{id:"table",label:"📋 Assignment Table"},{id:"notes",label:"📝 Notes & Warnings"}].map(t => (
+              <button key={t.id} onClick={()=>setTab(t.id)} style={{
+                padding:"8px 18px", borderRadius:8, fontSize:12, fontWeight:700, cursor:"pointer",
+                fontFamily:"'DM Sans',sans-serif", transition:"all 0.2s",
+                background: tab===t.id ? C.accentGlow : "transparent",
+                border:`1.5px solid ${tab===t.id ? C.accent : C.border}`,
+                color: tab===t.id ? C.accent : C.textDim,
+              }}>{t.label}</button>
+            ))}
+          </div>
+
+          <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:14, padding:20, minHeight:200 }}>
+            {tab==="diagram" && <StaffingDiagram result={result} setResult={setResult} />}
+            {tab==="table" && <AssignmentTable result={result} />}
+            {tab==="notes" && <NotesPanel notes={result.notes} result={result} />}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+LankenauStaffingApp;
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(React.createElement(LankenauStaffingApp));
+  </script>
+</body>
+</html>
