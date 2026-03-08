@@ -1,0 +1,16 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #0B1426;
+  font-family: 'DM Sans', -apple-system, sans-serif;
+  color: #E8ECF4;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
