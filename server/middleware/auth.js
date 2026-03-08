@@ -1,6 +1,4 @@
-import { createClerkClient } from '@clerk/backend'
-
-const clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY })
+import { verifyToken } from '@clerk/backend'
 
 /**
  * Verifies the Clerk JWT from Authorization header.
@@ -11,14 +9,18 @@ export async function requireAuth(req, res, next) {
     const token = req.headers.authorization?.split(' ')[1]
     if (!token) return res.status(401).json({ error: 'No token provided' })
 
-    const payload = await clerk.verifyToken(token)
+    const payload = await verifyToken(token, {
+      secretKey: process.env.CLERK_SECRET_KEY,
+      authorizedParties: [process.env.CLIENT_URL || 'http://localhost:5173'],
+    })
     req.auth = {
       userId: payload.sub,
       orgId: payload.org_id,
       orgRole: payload.org_role,
     }
     next()
-  } catch {
+  } catch (err) {
+    console.error('[requireAuth] token verification failed:', err.message)
     res.status(401).json({ error: 'Invalid or expired token' })
   }
 }
