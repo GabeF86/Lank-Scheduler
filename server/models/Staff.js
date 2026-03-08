@@ -2,11 +2,13 @@ import mongoose from 'mongoose'
 
 const StaffSchema = new mongoose.Schema({
   hospitalId: { type: String, required: true, index: true },
-  name: { type: String, required: true },
-  type: { type: String, enum: ['MD', 'CRNA'], required: true },
+  clerkUserId: String,       // link to Clerk user if they have login access
+  firstName: String,
+  lastName: String,
+  email: String,
+  type: { type: String, enum: ['MD', 'CRNA'] }, // set by admin after webhook creates the doc
   specialty: String,         // e.g. "Cardiac", "General", "Endo"
   active: { type: Boolean, default: true },
-  clerkUserId: String,       // link to Clerk user if they have login access
 }, {
   timestamps: true,
 })

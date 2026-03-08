@@ -1,6 +1,8 @@
 import api from './client'
 
 export const staffApi = {
+  me: () => api.get('/staff/me').then((r) => r.data),
+  sync: (data) => api.post('/staff/sync', data).then((r) => r.data),
   getAll: () => api.get('/staff').then((r) => r.data),
   create: (data) => api.post('/staff', data).then((r) => r.data),
   update: (id, data) => api.put(`/staff/${id}`, data).then((r) => r.data),
